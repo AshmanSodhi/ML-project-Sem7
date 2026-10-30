@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  body { font-family: sans-serif; margin: 0; padding: 4px; }
+  #box {
+    width: 100%; box-sizing: border-box; min-height: 130px;
+    font-size: 16px; padding: 10px; border-radius: 8px;
+    border: 2px solid #4CAF50; resize: vertical;
+  }
+  #box:focus { outline: none; border-color: #2196F3; }
+  #row { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
+  #status { font-size: 14px; color: #555; }
+  #dot { display:inline-block; width:10px; height:10px; border-radius:50%; background:#bbb; margin-right:6px; }
+  #dot.live { background:#4CAF50; }
+  #clear { font-size: 13px; padding: 4px 10px; border-radius: 6px; border: 1px solid #ccc; cursor: pointer; }
+</style>
+</head>
+<body>
+<textarea id="box" placeholder="Click here and type naturally... pause for 3 seconds when done."></textarea>
+<div id="row">
+  <span id="status"><span id="dot"></span><span id="msg">Listening — text never leaves your browser.</span></span>
+  <button id="clear">Clear</button>
+</div>
+<script>
+(function () {
+  // Minimal Streamlit custom-component protocol (no CDN needed, works offline).
+  function sendMsg(type, data) {
+    data = data || {};
+    data.isStreamlitMessage = true;
+    data.type = "streamlit:" + type;
+    window.parent.postMessage(data, "*");
+  }
+  var args = { gap_ms: 3000 };
+
+  var box = document.getElementById("box");
+  var msg = document.getElementById("msg");
+  var dot = document.getElementById("dot");
+
+  var events = [];        // {dwell, flight|null, correction}
+  var downTimes = {};     // code -> {t, flight}
+  var lastDown = null, lastUp = null, startTime = null, lastKeyTime = null;
+  var debounce = null;
+
+  function setStatus(text, live) {
+    msg.textContent = text;
+    dot.className = live ? "live" : "";
+  }
+  function fitHeight() {
+    sendMsg("setFrameHeight", { height: document.body.scrollHeight + 8 });
+  }
+
+  function resetWindow() {
+    events = []; downTimes = {};
+    lastDown = null; lastUp = null; startTime = null;
+  }
+
+  function finishWindow() {
+    if (events.length === 0) { setStatus("Listening — text never leaves your browser.", false); return; }
+    var dwells = [], flights = [], corr = 0, i;
+    for (i = 0; i < events.length; i++) {
+      dwells.push(Math.round(events[i].dwell * 10) / 10);
+      if (events[i].flight !== null) flights.push(Math.round(events[i].flight * 10) / 10);
+      corr += events[i].correction;
+    }
+    var dur = Math.max((lastUp - startTime) / 1000, 0.5);
+    sendMsg("setComponentValue", { value: {
+      win_id: Date.now(),
+      n_keys: events.length,
+      duration_sec: Math.round(dur * 100) / 100,
+      dwells: dwells,
+      flights: flights,
+      corrections: corr
+    }});
+    setStatus("Window sent (" + events.length + " keys) — keep typing for the next window.", false);
+    resetWindow();
+  }
+
+  box.addEventListener("keydown", function (e) {
+    if (e.repeat) return;               // ignore held-key auto-repeat
+    var now = performance.now();
+    if (startTime === null) startTime = now;
+    var flight = (lastDown === null) ? null : (now - lastDown);
+    downTimes[e.code] = { t: now, flight: flight };
+    lastDown = now; lastKeyTime = now;
+    clearTimeout(debounce);
+    setStatus("Typing… (" + (events.length + 1) + " keys)", true);
+  });
+
+  box.addEventListener("keyup", function (e) {
+    var now = performance.now();
+    var d = downTimes[e.code];
+    if (!d) return;
+    events.push({
+      dwell: now - d.t,
+      flight: d.flight,
+      correction: (e.key === "Backspace") ? 1 : 0
+    });
+    delete downTimes[e.code];
+    lastUp = now; lastKeyTime = now;
+    clearTimeout(debounce);
+    debounce = setTimeout(finishWindow, args.gap_ms || 3000);
+  });
+
+  document.getElementById("clear").addEventListener("click", function () {
+    box.value = ""; resetWindow(); clearTimeout(debounce);
+    setStatus("Listening — text never leaves your browser.", false);
+  });
+
+  // Live "time since last keypress" indicator.
+  setInterval(function () {
+    if (lastKeyTime !== null && events.length > 0) {
+      var idle = (performance.now() - lastKeyTime) / 1000;
+      var gap = (args.gap_ms || 3000) / 1000;
+      if (idle < gap) setStatus("Paused " + idle.toFixed(1) + "s — predicting in " + Math.max(gap - idle, 0).toFixed(1) + "s…", true);
+    }
+  }, 200);
+
+  window.addEventListener("message", function (ev) {
+    var data = ev.data;
+    if (!data || data.type !== "streamlit:render") return;
+    if (data.args) { try { args = JSON.parse(data.args); } catch (err) { args = data.args || args; } }
+    fitHeight();   // note: textarea content is NEVER cleared on re-render
+  });
+
+  sendMsg("componentReady", { apiVersion: 1 });
+  fitHeight();
+})();
+</script>
+</body>
+</html>
